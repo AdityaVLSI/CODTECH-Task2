@@ -1,0 +1,286 @@
+/* ************************************
+////////////////////////////////
+///Name : Aditya Singh /////////
+
+///Project Title: UART Communiction Protocol /////////////
+
+///Date: 13/09/2024 /////////////////////////////////////
+
+**************************************/
+
+
+module top_module (
+    input wire clk,          // System clock
+    input wire reset,        // Reset signal
+    input wire tx_start,     // Signal to start transmission
+    input wire [7:0] tx_data,// Data to be transmitted
+ 
+    output wire tx,          // UART transmit line
+    output wire tx_ready,    // Transmission ready signal
+    output wire [7:0] rx_data,// Received data
+    output wire rx_ready     // Data received signal
+);
+
+    // Instantiate the UART Transmitter
+    uart_tx #(
+        .BAUD_RATE(9600),
+        .CLOCK_FREQ(50000000)
+    ) uart_tx_inst (
+        .clk(clk),
+        .reset(reset),
+        .tx_start(tx_start),
+        .tx_data(tx_data),
+        .tx(tx),
+        .tx_ready(tx_ready)
+    );
+
+    // Instantiate the UART Receiver
+    uart_rx #(
+        .BAUD_RATE(9600),
+        .CLOCK_FREQ(50000000)
+    ) uart_rx_inst (
+        .clk(clk),
+        .reset(reset),
+        .rx(tx),          // Connect the UART transmit line to the receiver input
+        .rx_data(rx_data),
+        .rx_ready(rx_ready)
+    );
+endmodule
+
+
+/* Module instantiate */
+
+// Transmitter Module
+
+module uart_tx (
+    input wire clk,          // System clock
+    input wire reset,        // Reset signal to its initial state 
+    input wire tx_start,     // A signal to trigger the start of data transmission
+    input wire [7:0] tx_data,// Data to be transmitted
+    output reg tx,           // UART transmit line
+    output reg tx_ready      // Transmission ready signal
+);
+
+    // UART parameters
+    parameter BAUD_RATE = 9600; /* baud rate is the rate at which information
+     is transferred in a communication channel in this case BR 9600*/
+     
+    parameter CLOCK_FREQ = 50000000; // 50 MHz clock system clock frequency
+
+    localparam BIT_PERIOD = CLOCK_FREQ / BAUD_RATE; //Define the number of clock cycles for each bit priod(bit time).
+    // for this case the bit time = 5208 micro sec 
+
+    // Internal signals
+    reg [15:0] counter;  //A 16-bit register used as a counter to measure the bit period
+    reg [3:0] bit_index; //4-bit register used to keep track of the current bit being transmitted
+    reg [7:0] shift_reg; //8-bits shift reg that holds the data being transmitted 
+    reg sending;         // A flag that indicates whether the module is currently sending data
+
+    // Counter for bit period
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            counter <= 0;
+        end else if (sending) begin /* If data is currently being sent,
+         the counter increments every clock cycle until it reaches the bit period.*/
+         
+            if (counter == BIT_PERIOD - 1) begin  // when counter reach the bit_period then counter become
+            // reset again for next data 
+                counter <= 0;
+            end else begin
+                counter <= counter + 1;
+            end
+        end
+    end
+
+    // Transmit logic
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin  /* If the reset signal is high, all signals are initialized: 
+                              tx is set to 1 (idle state), 
+                              tx_ready is set to 1 (indicating readiness to transmit), 
+                                and sending is set to 0. */
+            tx <= 1; // 
+            tx_ready <= 1;
+            sending <= 0;
+            bit_index <= 0;
+        end else if (tx_start && tx_ready) begin /* When a transmission starts and the transmitter is ready, 
+                                                   tx_ready is set to 0 (busy), and sending is set to 1. 
+                                                   The shift_reg is loaded with tx_data and tx sends the start bit (0). 
+                                                 */
+                                                 
+            tx_ready <= 0;
+            sending <= 1;
+            shift_reg <= tx_data;
+            bit_index <= 0;
+            tx <= 0; // Start bit
+        end else if (sending) begin             /* If transmission is ongoing and the counter reaches the bit period, 
+                                                   the next bit of data is shifted out using the shift_reg until all 8 bits are sent. 
+                                                   
+                                                               */
+                                                                                                          
+            if (counter == BIT_PERIOD - 1) begin
+                if (bit_index < 8) begin
+                    tx <= shift_reg[0];
+                    shift_reg <= shift_reg >> 1;
+                    bit_index <= bit_index + 1;
+                end else begin
+                    tx <= 1;     // After all bits are transmitted, the stop bit (1) is sent,
+                                  //and the transmitter goes idle, ready for the next transmission.
+                    sending <= 0;
+                    tx_ready <= 1;
+                end
+            end
+        end
+    end
+
+endmodule
+
+
+//Receiver module
+
+module uart_rx (
+    input wire clk,          // System clock
+    input wire reset,        // Reset signal
+    input wire rx,           // Input signal for the  UART receive line
+    output reg [7:0] rx_data,// Received data
+    output reg rx_ready      // Data received signal
+);
+
+    // UART parameters
+    parameter BAUD_RATE = 9600;           // Remember That transmitior BR and receiver BR should be same 
+    parameter CLOCK_FREQ = 50000000; // 50 MHz clock
+
+    localparam BIT_PERIOD = CLOCK_FREQ / BAUD_RATE;
+
+    // Internal signals
+    reg [15:0] counter;
+    reg [3:0] bit_index;
+    reg [7:0] shift_reg;
+    reg receiving;          // Indicates whether the receiver is in the process of receiving data
+    reg sample;             // A signal that indicates when to sample the incoming bit
+
+    // Counter for bit period
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            counter <= 0;
+        end else if (receiving) begin
+            if (counter == BIT_PERIOD - 1) begin  //If the receiver is active the counter increments until it reaches the bit period.
+                counter <= 0;
+                sample <= 1;   // When the counter reaches the bit period ,it indicates that a bit should be sampled
+            end else begin
+                counter <= counter + 1;
+                sample <= 0;
+            end
+        end
+    end
+
+    // Receive logic
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin                           // Initialize all signal 
+            rx_data <= 0;
+            rx_ready <= 0;
+            receiving <= 0;
+            bit_index <= 0;
+        end else if (!receiving && ~rx) begin // If the receiver is idle (i.e., not receiving),
+                                              // and a start bit (low signal, ~rx) is detected, it initiates the receiving process.
+            receiving <= 1;                  // Sets the receiving flag to indicate that the module is now receiving data.
+            counter <= 0;                    // Resets the counter to start timing the bit periods.
+            bit_index <= 0;                  // Initializes the bit index to zero, preparing to receive the first bit.
+       
+       
+        end else if (receiving && sample) begin  // If the receiver is currently receiving data and it's time to sample a bit (as indicated by sample):
+            if (bit_index < 8) begin             // If fewer than 8 bits have been received:
+                shift_reg[bit_index] <= rx;      //The current bit from the rx line is stored in the shift_reg at the position indicated by bit_index.
+                bit_index <= bit_index + 1;      // The  bit index is incremented to prepare for the next bit
+            
+            
+            end else begin                       // Once all 8 bit have been received 
+                rx_data <= shift_reg;           // The received 8-bit data is transferred from the shift register to rx_data
+                rx_ready <= 1;                  // The rx_ready flag is set , signaling that valid data has been received 
+                receiving <= 0;                 // The receiving process is completed ,and the module is ready for the next reception
+            end
+        end else begin
+            rx_ready <= 0;   /* If no new data is being received 
+                                (i.e., after a successful reception or if no start bit is detected),
+                                  the rx_ready signal is cleared, indicating that 
+                                  the module is idle and waiting for the next transmission.*/
+        end
+    end
+
+endmodule
+
+
+/* Testbench For Top_module check the code work properly */
+
+
+module tb_uart;
+
+    // Testbench signals
+    
+    //Input
+    reg clk;
+    reg reset;
+    reg tx_start;
+    reg [7:0] tx_data; 
+    
+    //Output
+    wire tx;
+    wire tx_ready;
+    wire [7:0] rx_data;
+    wire rx_ready;
+
+    // Instantiate the top-level module
+    top_module uut (
+        .clk(clk),
+        .reset(reset),
+        .tx_start(tx_start),
+        .tx_data(tx_data),
+        .tx(tx),
+        .tx_ready(tx_ready),
+        .rx_data(rx_data),
+        .rx_ready(rx_ready)
+    );
+
+    // Clock generation
+    initial begin
+        clk = 0;
+        forever #10 clk = ~clk; // 50 MHz clock
+    end
+
+    // Test procedure
+    initial begin
+        // Initialize signals
+        reset = 1;
+        tx_start = 0;
+        tx_data = 8'h00;  //tx_data is set to Initialize
+
+        // Apply reset
+        #100;
+        reset = 0;
+
+        // Test 1: Send data 'A' (0x41)
+        tx_data = 8'h35;   // Data has transmit 35 (0011 0101) 
+        tx_start = 1;      // start Bit is set to 1 Then data will transmit
+        #20; // Wait for the transmission to start
+        tx_start = 0;
+
+        // Wait for transmission to complete
+        wait (tx_ready == 1);
+        #100; // Allow some time for the data to be transmitted
+
+        // Wait for reception to complete
+        wait (rx_ready == 1);
+        #100;
+
+        // Check if received data matches expected value
+        if (rx_data == 8'h35) begin
+            $display("Test Passed: Received data = %h", rx_data);
+        end else begin
+            $display("Test Failed: Received data = %h", rx_data);
+        end
+
+        // End simulation
+        $finish;
+    end
+
+endmodule
+
